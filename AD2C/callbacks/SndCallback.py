@@ -72,8 +72,6 @@ class SndCallback(Callback):
         episode_returns = [] # List of Rewards For each Evalution episode
         
         
-        update_step_clamped = 0.0
-
         with torch.no_grad():
             for r in rollouts:
                 obs = r.get((self.control_group, "observation"))
