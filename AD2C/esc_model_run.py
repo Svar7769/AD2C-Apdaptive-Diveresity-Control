@@ -16,7 +16,6 @@ from AD2C.callbacks.SndCallback import SndCallback as SndCallbackClass
 from AD2C.callbacks.SimpleProportionalController import SimpleProportionalController
 from AD2C.callbacks.clusterSndCallback import clusterSndCallback
 from AD2C.callbacks.fixed_callbacks import *
-from AD2C.callbacks.esc_callback import ExtremumSeekingController
 
 
 import benchmarl.models
@@ -31,6 +30,7 @@ from benchmarl.hydra_config import (
     load_model_config_from_hydra,
 )
 from AD2C.models.het_control_mlp_empirical import HetControlMlpEmpirical, HetControlMlpEmpiricalConfig
+from AD2C.models.het_control_mlp_esc import HetControlMlpEsc, HetControlMlpEscConfig
 # from AD2C.callback123 import *
 from AD2C.environments.vmas import render_callback
 
@@ -38,16 +38,17 @@ from AD2C.environments.vmas import render_callback
 def setup(task_name):
     benchmarl.models.model_config_registry.update(
         {
-            "hetcontrolmlpempirical": HetControlMlpEmpiricalConfig,
+            # "hetcontrolmlpempirical": HetControlMlpEmpiricalConfig,
+            "hetcontrolmlpesc": HetControlMlpEscConfig
         }
     )
     if task_name == "vmas/navigation":
         VmasTask.render_callback = render_callback
 
-def create_experiment(cfg: DictConfig, callbacks_for_run) -> Experiment:
+def create_experiment(cfg: DictConfig, callbacks_for_run: List[Callback], run_name: str) -> Experiment:
     hydra_choices = HydraConfig.get().runtime.choices
     task_name = hydra_choices.task
-    # algorithm_name = hydra_choices.algorithm
+    algorithm_name = hydra_choices.algorithm # Get algorithm name here
     
     setup(task_name)
     
@@ -68,6 +69,11 @@ def create_experiment(cfg: DictConfig, callbacks_for_run) -> Experiment:
     else:
         model_config.probabilistic = False
 
+    # ---------------------------------------------------------------------
+    # ADDED LOGIC: Set experiment name here
+    experiment_config.name = run_name
+    # ---------------------------------------------------------------------
+
     return Experiment(
         task=task_config,
         algorithm_config=algorithm_config,
@@ -83,79 +89,43 @@ def create_experiment(cfg: DictConfig, callbacks_for_run) -> Experiment:
 def hydra_main(cfg: DictConfig) -> None:
     hydra_choices = HydraConfig.get().runtime.choices
     task_name = hydra_choices.task
-    
-    
-    # Define SND arms and other parameters
-    # snd_arms = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-    snd_arms = [0.0, 0.5, 0.8, 1, 2, 3]
-    # snd_arms = [1]
-    exploration_frames = 600_000
-    # final_frames = 6_000_000
+    algorithm_name = hydra_choices.algorithm
+
+    # For the ESC model, you typically run one experiment, not a sweep
+    total_frames = 5_000_000 # Set the total frames for the single run
     
     base_save_folder = HydraConfig.get().run.dir
 
-    # --- Phase 1: Exploration ---
-    print("\n--- PHASE 1: EXPLORATION (Running short experiments) ---")
-    exploration_parent_folder = os.path.join(base_save_folder, "exploration_runs")
+    # --- Create a single configuration for the ESC model run ---
+    experiment_cfg = OmegaConf.create(cfg)
     
-    for i, snd in enumerate(snd_arms):
-        exploration_cfg = OmegaConf.create(cfg)
-        
-        run_save_folder = os.path.join(exploration_parent_folder, f"snd_{snd}")
-        os.makedirs(run_save_folder, exist_ok=True)
-        
-        exploration_cfg.experiment.save_folder = run_save_folder
-        exploration_cfg.experiment.max_n_frames = exploration_frames
-        exploration_cfg.seed = cfg.seed
-        
-        exploration_cfg.model.desired_snd = snd
-                
-        callbacks = [
-            # SndCallbackClass(
-            #     control_group="agents",
-            #     initial_snd=snd,  # 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
-            # ),
-
-            # gradientBaseSndCallback(
-            #     control_group = "agents",
-            #     initial_snd = snd,
-            #     learning_rate = 0.01,
-            #     alpha = 0.01,
-            # ),
-        
-            # clusterSndCallback(
-            #     control_group="agents",
-            #     initial_snd=snd,  # 0.0, 0.1,
-            # ),
-
-            # pIControllerCallback(
-            #     control_group="agents",
-            #     proportional_gain=0.2,
-            #     initial_snd=snd,  # 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
-            # ),
+    run_save_folder = os.path.join(base_save_folder, "esc_run")
+    os.makedirs(run_save_folder, exist_ok=True)
+    
+    experiment_cfg.experiment.save_folder = run_save_folder
+    experiment_cfg.experiment.max_n_frames = total_frames
+    experiment_cfg.seed = cfg.seed
+    
+    # The run name for the ESC model
+    run_name = f"{algorithm_name}_esc_controller"
             
-            ExtremumSeekingController(
-                control_group = "agents",
-                initial_snd = snd,
-                # ESC parameters
-                dither_amplitude = 0.01,
-                dither_frequency= 0.2,
-                integral_gain= 0.1,
-            ),
+    # Callbacks for the experiment
+    callbacks = [
+        SndLoggingCallback(),
+        NormLoggerCallback(),
+        ActionSpaceLoss(use_action_loss=cfg.use_action_loss, action_loss_lr=cfg.action_loss_lr),
+    ]
+    
+    print(f"\nRunning experiment with ESC model (Seed: {experiment_cfg.seed})")
+    
+    # Create and run the experiment
+    experiment = create_experiment(
+        cfg=experiment_cfg, 
+        callbacks_for_run=callbacks, 
+        run_name=run_name
+    )
+    experiment.run()
 
-            # SimpleProportionalController(
-            #     control_group="agents",
-            #     proportional_gain=0.2,
-            #     initial_snd=snd,  # 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0
-            # ),
 
-            NormLoggerCallback(),
-            ActionSpaceLoss(use_action_loss=cfg.use_action_loss, action_loss_lr=cfg.action_loss_lr),   
-        ]
-        
-        print(f"\nRunning exploration for SND: {snd} (Seed: {exploration_cfg.seed})")
-        experiment = create_experiment(cfg=exploration_cfg, callbacks_for_run=callbacks)
-        experiment.run()
-        
 if __name__ == "__main__":
     hydra_main()
